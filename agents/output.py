@@ -1,6 +1,8 @@
 # agents/output.py — quality badge, body, provenance footer; save_run.
 from memory import save_run
 
+TRAVEL_KEYS = ("flight", "airline", "airport", "booking", "visa", "schedule")
+
 
 def _quality_badge(state: dict) -> str:
     conf = state.get("research_confidence", 0.0)
@@ -29,6 +31,15 @@ def output_agent(state: dict):
     else:
         body = draft or ""
 
+    _disclaimer = ""
+    if any(k in state.get("goal", "").lower() for k in TRAVEL_KEYS) and state.get(
+        "research_confidence", 0
+    ) < 0.55:
+        _disclaimer = (
+            "> *Travel info may be incomplete; confirm schedules and entry rules "
+            "with carriers and official sources.*\n\n"
+        )
+
     badge = _quality_badge(state)
     footer = (
         f"\n\n---\n*Run: `{state.get('session_id', '?')}` · "
@@ -38,7 +49,7 @@ def output_agent(state: dict):
         f"revisions={state.get('revision_count', 0)}*"
     )
 
-    state["final_output"] = badge + body + footer
+    state["final_output"] = badge + _disclaimer + body + footer
 
     try:
         save_run(state["user_id"], state["goal"], state)
