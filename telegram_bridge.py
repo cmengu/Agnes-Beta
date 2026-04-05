@@ -358,9 +358,7 @@ def poll_loop() -> None:
                         if text in ("/start", "/help"):
                             send_message(
                                 chat_id,
-                                "Send a research goal as a normal message.\n"
-                                "Live updates: default (TELEGRAM_LIVE_STATUS=1).\n"
-                                "Most reliable for long runs: TELEGRAM_LIVE_STATUS=0 (one /run only).",
+                                "Send me any research question and I'll get back to you with a full report.",
                             )
                         continue
 
