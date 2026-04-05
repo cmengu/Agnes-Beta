@@ -1,20 +1,55 @@
 # AgnesClaw (AgnesOps)
 
-## Objective
+## What it is
 
-**AgnesOps** is a multi-agent research and writing pipeline: a user states a goal, the system checks it against a written **constitution**, decomposes it into sub-tasks, runs **real web search** with basic **prompt-injection sanitisation**, drafts a structured Markdown report with **inline `[n]` citations** (from a numbered source list), and passes it through a **critic** (debate-style review and scored feedback). The **research** node runs sub-tasks **in parallel** (thread pool + URL dedup, including after critic “recheck” routing). **Output** prepends a small **quality badge** (confidence, critic score, revisions, source count). The default stack uses **Agnes** via an OpenAI-compatible API (**ZenMux**) for LLM calls, **LangGraph** (pinned `>=0.1.0` for `ainvoke` / `astream`) for orchestration, and **FastAPI** with **async** `/run` and `/run/stream`. Optional **OpenClaw** configuration (under `openclaw/`) describes how to expose the same backend to channels such as Telegram.
+**AgnesOps** turns a research goal into a cited Markdown report: a **constitution** check, **parallel web research**, **writer** with inline **`[n]` citations**, and a **critic** that debates and scores the draft before delivery. Orchestration is **LangGraph**; the API is **FastAPI** (`/run`, `/run/stream`); LLM calls go through **ZenMux** (OpenAI-compatible). Policy, state, memory, and agents live in separate modules so the pipeline stays easy to trace and test.
 
-The repository’s purpose is to keep **policy** (`constitution.md`), **shared state** (`state.py`), **persistence** (`memory.py`), and **agent behaviour** (`agents/`) separate so the graph stays testable and the demo narrative (“constitution → research → write → critic → output”) stays traceable.
+---
 
-**Research confidence (heuristic):** The quality badge’s research confidence is **not** “booking accuracy” or a guarantee of correct schedules or prices. It is derived from **high-signal** fetches (enough readable text, low boilerplate markers) and **domain diversity** among those sources (`agents/research.py`). Script-heavy or bot-wall pages can lower confidence even when many URLs were retrieved.
+## Features
+
+### Research and evidence
+
+- **Parallel sub-tasks** with a thread pool, **URL deduplication** (including after a critic-triggered research pass).
+- **Smarter “confidence”** — not raw page count. Each fetched page is scored for **readability vs boilerplate** (script shells, trackers, bot-wall patterns). Confidence reflects **high-signal sources** and **how many distinct domains** they come from, so a pile of empty SPAs does not read as “100% sure.”
+- **Resilient fetching** — **retries with backoff**, **browser-like HTTP headers**, and an optional **Playwright** pass for short or boilerplate-heavy HTML when `USE_PLAYWRIGHT_FETCH=1` (see [Optional: Playwright](#optional-playwright-for-js-heavy-pages)).
+- **Thin evidence → honest synthesis** — when there are **few high-signal extracts**, the synthesiser is nudged to say when schedules/prices are missing and **not to invent** flight-style facts.
+
+### Writing, critic, and output
+
+- **Structured report** with citations tied to a numbered source list.
+- **Critic** runs a steelman vs critique debate, then **arbitration scored** on completeness, clarity, and **actionability**, with prompts **anchored to your stated goal** so vague drafts get pressured to answer the ask.
+- **Quality badge** on the **API** response (`research_confidence`, critic average, revisions, clean source count). A **travel-style disclaimer** (blockquote) appears when the goal looks travel-related and evidence confidence is below a threshold — reminds users to confirm with carriers and official sources.
+- **Writer truncation** — if the draft hits the token limit, a **warning** is visible in `status_messages`; downstream surfaces can use that to tell the user the report may be incomplete.
+
+### API and observability
+
+- **`POST /run`** — full JSON: `final_output`, `status_messages`, `session_log`, critic scores (aggregate + per-axis), `research_confidence`, errors, etc.
+- **`POST /run/stream`** — **SSE** with incremental `delta_status`, live metrics, then a final `done` event with the same shape as `/run`.
+- **Structured logs** — each run emits a JSON line with `event: run_start`, `session_id`, `user_id`, and goal length (stderr), useful for demos and debugging.
+
+### Telegram experience
+
+The **`telegram_bridge.py`** adapter keeps **API responses unchanged** (badge + footer stay in `final_output` for the web UI and `curl`). On Telegram, users get a **cleaner experience**:
+
+- Short **“On it…”** acknowledgement instead of internal setup text.
+- **~5 milestone-style updates** (e.g. preparing plan, researching, writing, refining) — noisy lines like per-sub-task source counts are **filtered**; **writer truncation warnings** still pass through **verbatim** when they occur.
+- **Final message** has the **badge and run footer stripped** so users see the **report body** (and **travel disclaimer** when present). If a run was **truncated at the token limit**, a **plain-language note** is appended to the final message.
+- **Typing indicator** while the stream is open, plus a **“still running”** nudge if there is **no new status for ~120s**.
+- **`/start` / `/help`** — one-line invite to send a research question (no env-tuning jargon).
+- Set **`TELEGRAM_LIVE_STATUS=0`** for a single **`POST /run`** and one reply when the run finishes (fewer messages, useful if SSE is flaky). **`AGNES_RUN_TIMEOUT_SEC`** caps wait time (default 900s).
+
+### Optional and future
+
+- **`docs/tinyfish-hook.md`** — how a future **TinyFish** (or similar) render API could plug in for the hardest bot-wall pages; **no vendor integration in-repo** until you add credentials and code.
+
+**Research confidence is not “booking accuracy.”** It is a **heuristic** over extract quality and domain spread. Use it as a **signal**, not a guarantee of correct schedules, prices, or entry rules.
 
 ---
 
 ## High-level architecture
 
-At the highest level, clients call a small FastAPI surface. The app builds a single **frontier state** object (budgets, provenance, scores) and runs one **LangGraph** execution (`ainvoke` / `astream` under the hood). Agents mutate that state and set `next_agent`; only `graph.py` wires transitions. Research talks to external search and fetch HTTP APIs, not to the LLM, for current web facts; synthesis caps context (e.g. top clean sources, truncated per page) for smaller models. Memory is file-backed JSON for user history, distilled “skills,” and a small cross-goal source cache—surfaced via **`/history/{user_id}`** and **`/skills`**.
-
-Below uses `graph TD`, short labels, and no quoted subgraph titles so it matches [GitHub-flavored Mermaid](https://github.blog/developer-skills/github/include-diagrams-markdown-files-mermaid/) more reliably. If the diagram still shows a blank box or “chunk failed”, try a hard refresh; that error is often GitHub’s viewer failing to load its Mermaid JS bundle, not your syntax.
+Clients call a small FastAPI surface. The app builds one **frontier state** (budgets, provenance, scores) and runs a single **LangGraph** execution. Agents update state and set `next_agent`; `graph.py` wires routes. Research uses search + HTTP fetch; synthesis caps context for smaller models. Memory is file-backed JSON (`/history`, `/skills`).
 
 ```mermaid
 graph TD
@@ -42,21 +77,17 @@ graph TD
 
 | Endpoint | Role |
 |----------|------|
-| `GET /health` | Liveness: `status`, configured `model`, `search_provider`. |
-| `GET /history/{user_id}` | Summaries of past runs from `memory_store.json`. |
-| `GET /skills` | Distilled skill library from `skill_store.json`. |
-| `POST /run` | Full async run; JSON includes `final_output`, `status_messages`, `session_log`, **`critic_score`** (top-level, backward compatible), **`scores`** (`critic`, `completeness`, `clarity`, `actionability`), `research_confidence`, `error`, etc. |
-| `POST /run/stream` | **SSE** (`text/event-stream`): incremental `delta_status`, metrics, per-axis critic fields; final event has `done: true` plus the same body shape as `/run`. |
+| `GET /health` | Liveness: `status`, `model`, `search_provider`. |
+| `GET /history/{user_id}` | Past run summaries from `memory_store.json`. |
+| `GET /skills` | Skill library from `skill_store.json`. |
+| `POST /run` | Full async run; full `final_output` (badge + body + footer), scores, `status_messages`, etc. |
+| `POST /run/stream` | SSE: incremental `delta_status` and metrics; final event `done: true` + same fields as `/run`. |
 
-**Live demo UI:** open **`demo.html`** in a browser (with CORS enabled on the API). It posts to `http://127.0.0.1:8000/run/stream` and renders Markdown output. Change the `API_BASE` constant in the script if the server host or port differs.
+**Live demo UI:** open **`demo.html`** (CORS toward your API). Set `API_BASE` in the script if the host/port differs.
 
 ---
 
 ## Agent graph
-
-Each node is a Python function that reads and updates the shared `AgentState` (`state.py`). Routing is **data-driven**: after every step, LangGraph evaluates `route(state)` → `state["next_agent"]` and follows the matching edge. The **output** node always terminates the run (`output` → `END`); it formats the deliverable, appends a short provenance footer, and calls `save_run`.
-
-Typical control flow (actual wiring is the same `next_agent` mechanism from every node):
 
 ```mermaid
 graph TD
@@ -69,7 +100,7 @@ graph TD
 
   CO -->|ok| RE
   CO -->|block or budget| OUT
-  RE -->|parallel fetch plus synthesis in one node| WR
+  RE -->|parallel fetch plus synthesis| WR
   WR --> CR
   CR -->|recheck once| RE
   CR -->|revise| WR
@@ -84,15 +115,17 @@ graph TD
 
 | Path | Responsibility |
 |------|------------------|
-| `server.py` | FastAPI: CORS, `build_initial_state`, async `/run` / `/run/stream`, `/health`, `/history`, `/skills`. |
-| `demo.html` | Single-file SSE client: agent strip, metrics, Markdown report (Tailwind + marked). |
-| `graph.py` | LangGraph definition and compiled `graph`. |
-| `state.py` | `AgentState` TypedDict — single contract for all agents. |
-| `constitution.md` | Rules the coordinator enforces before research. |
-| `memory.py` | User runs, skill distillation, community source cache (JSON files). |
-| `agents/*.py` | Coordinator, research, writer, critic, output implementations. |
-| `openclaw/` | Agent persona and skill stubs for OpenClaw/Telegram integration. |
-| `.env.example` | Required env vars (ZenMux, search provider, critic threshold, optional Telegram). |
+| `server.py` | FastAPI, `build_initial_state`, `/run`, `/run/stream`, logging, `/health`, `/history`, `/skills`. |
+| `telegram_bridge.py` | Telegram polling; SSE or sync run; **feature-filtered** copy for DMs. |
+| `demo.html` | SSE client, metrics, Markdown rendering. |
+| `graph.py` | LangGraph definition. |
+| `state.py` | `AgentState` contract. |
+| `constitution.md` | Coordinator policy. |
+| `memory.py` | Runs, skills, JSON stores. |
+| `agents/*.py` | Coordinator, research, writer, critic, output. |
+| `openclaw/` | OpenClaw / persona stubs. |
+| `docs/tinyfish-hook.md` | Optional future fetch backend notes. |
+| `.env.example` | Env template (ZenMux, search, Telegram, optional Playwright flag). |
 
 ---
 
@@ -105,41 +138,33 @@ cp .env.example .env   # fill ZENMUX_API_KEY and the search key for SEARCH_PROVI
 uvicorn server:app --host 127.0.0.1 --port 8000
 ```
 
-**Timeouts:** `AGNES_RUN_TIMEOUT_SEC` (default 900) caps how long `telegram_bridge.py` waits on `POST /run` and `/run/stream`.
-
-Then open `demo.html` locally, or probe the API:
-
-Example request:
+Example:
 
 ```bash
 curl -s -X POST http://127.0.0.1:8000/run \
   -H "Content-Type: application/json" \
-  -d '{"goal":"Your research question here","user_id":"local-test","channel":"telegram"}'
+  -d '{"goal":"Your research question here","user_id":"local-test","channel":"web"}'
 ```
 
-### Telegram (same laptop as the API)
-
-`getUpdates` only proves the bot receives chats. To **run AgnesOps from Telegram**, start the API and the bridge:
+### Telegram (local or hosted API)
 
 ```bash
 # Terminal 1
 uvicorn server:app --host 127.0.0.1 --port 8000
 
-# Terminal 2 (needs TELEGRAM_BOT_TOKEN and AGNES_API_BASE in .env)
+# Terminal 2 — TELEGRAM_BOT_TOKEN and AGNES_API_BASE in .env
 python telegram_bridge.py
 ```
 
-Then message **`@AgnesHackathonBot`** with a research goal (not only `/start`). By default the bridge uses **`/run/stream`**: you get **several Telegram texts** as the pipeline runs (same `status_messages` as the backend), then the **full report**. Set **`TELEGRAM_LIVE_STATUS=0`** in `.env` if you only want one “Running…” plus the final message. The terminal running `telegram_bridge.py` also **prints** each SSE line so you can observe processing there. For a **hosted** API, set `AGNES_API_BASE` to that public URL instead.
+Message the bot with a **research question** (not only `/start`). Default mode uses **`/run/stream`** with the **simplified milestone + clean report** behavior above. Use **`TELEGRAM_LIVE_STATUS=0`** for one **`/run`** and a single final message. For a remote API, set **`AGNES_API_BASE`** to that URL.
 
 Do not commit `.env`; rotate any key that has been shared or logged.
 
 ### Optional: Playwright for JS-heavy pages
-
-Some sites return little text over plain HTTP. Set `USE_PLAYWRIGHT_FETCH=1` in `.env` and install the extra dependency, then install a browser:
 
 ```bash
 pip install -r requirements-playwright.txt
 playwright install chromium
 ```
 
-Fetches still default to **httpx** first; Playwright runs only when the env flag is on and the stripped HTML looks short or boilerplate-heavy (see `agents/research.py` `fetch_page`). This adds latency and binary weight — keep the flag off unless you need it.
+Set **`USE_PLAYWRIGHT_FETCH=1`** in `.env`. Plain **httpx** fetch runs first; Playwright only helps when the stripped page still looks empty or boilerplate-heavy. Adds latency and browser weight — leave off unless you need it.
