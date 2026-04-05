@@ -116,7 +116,10 @@ def critic(state: dict):
         user=(
             f"Steelman:\n{steelman}\n\n"
             f"Critique:\n{devil}\n\n"
-            f"Draft:\n{state['draft']}"
+            f"Draft:\n{state['draft']}\n\n"
+            f"User goal (must be addressed in Recommendations): {state['goal']}\n"
+            f"Penalize actionability if the draft does not answer this goal with concrete steps "
+            f"or explicitly states missing data needed to answer."
         ),
     )
 
