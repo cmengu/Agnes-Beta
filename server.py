@@ -1,4 +1,4 @@
-# server.py — FastAPI: CORS, /health, /history, /skills, /run, /run/stream.
+# server.py — FastAPI: CORS, /health, /history, /skills; async /run and /run/stream (ainvoke/astream).
 import json
 import os
 import time
@@ -141,19 +141,19 @@ def skills():
 
 
 @app.post("/run")
-def run(req: RunRequest):
+async def run(req: RunRequest):
     initial_state = build_initial_state(req)
-    final_state = graph.invoke(initial_state)
+    final_state = await graph.ainvoke(initial_state)
     return _finalize_response(final_state)
 
 
 @app.post("/run/stream")
-def run_stream(req: RunRequest):
-    def event_source():
+async def run_stream(req: RunRequest):
+    async def event_source():
         initial_state = build_initial_state(req)
         prev_n = 0
         last_state = initial_state
-        for last_state in graph.stream(initial_state, stream_mode="values"):
+        async for last_state in graph.astream(initial_state, stream_mode="values"):
             msgs = last_state.get("status_messages") or []
             delta = msgs[prev_n:] if len(msgs) > prev_n else []
             prev_n = len(msgs)
