@@ -47,6 +47,54 @@ LIVE_DEFAULT = os.getenv("TELEGRAM_LIVE_STATUS", "1").lower() in (
     "on",
 )
 
+# Maps internal agent status prefixes to user-visible phrases.
+# Prefixes are matched with str.startswith(); first match wins.
+# None = suppress the message entirely.
+# NOTE: "Writer: WARNING" is handled by the special case in _user_friendly_status
+# BEFORE this map is consulted — it must NOT appear here (see D1 in Architecture Overview).
+_STATUS_MAP: tuple[tuple[str, str | None], ...] = (
+    ("Coordinator:", "Preparing your research plan…"),
+    ("Research: running", "Researching your question…"),
+    ("Research: synthesising", "Synthesising findings…"),
+    ("Writer:", "Writing your report…"),
+    ("Critic: revision", "Refining the answer…"),
+)
+
+
+def _user_friendly_status(msg: str) -> str | None:
+    """Return a user-friendly phrase for this internal status, or None to suppress.
+
+    Writer: WARNING messages are forwarded verbatim before the map is consulted.
+    They must NOT appear in _STATUS_MAP — see D1 in the plan Architecture Overview.
+    """
+    # Forward truncation warnings verbatim — they carry specific user-relevant content.
+    # This check MUST remain above the _STATUS_MAP loop so that "Writer:" in the map
+    # does not absorb these messages with a generic phrase.
+    if msg.startswith("Writer: WARNING"):
+        return msg
+    for prefix, friendly in _STATUS_MAP:
+        if msg.startswith(prefix):
+            return friendly
+    return None
+
+
+def _strip_technical_metadata(text: str) -> str:
+    """Remove the quality badge header and run footer from final_output.
+
+    Preserves the body, error notices (⚠️ prefix), and the travel disclaimer blockquote.
+    Input structure: badge\\n\\n[disclaimer\\n\\n]body[\\n\\n---\\n*Run:...]
+    """
+    # Remove quality badge (first paragraph starting with "> **AgnesOps")
+    if text.startswith("> **AgnesOps"):
+        end = text.find("\n\n")
+        if end != -1:
+            text = text[end + 2 :]
+    # Remove run footer
+    footer_idx = text.find("\n\n---\n*Run:")
+    if footer_idx != -1:
+        text = text[:footer_idx]
+    return text.strip()
+
 
 def _api_unreachable_message() -> str:
     return (
@@ -140,11 +188,8 @@ def run_via_stream(chat_id: int, goal: str) -> None:
         "user_id": str(chat_id),
         "channel": "telegram",
     }
-    send_message(
-        chat_id,
-        "AgnesOps started — progress messages, then the full report. "
-        f"If nothing arrives for ~{_TIMEOUT_SEC:.0f}s, check Terminal 1 (uvicorn).",
-    )
+    send_message(chat_id, "On it…")
+    _sent_statuses: set[str] = set()
     got_final = False
     _stop_typing = threading.Event()
     _typing_thread = threading.Thread(
@@ -179,7 +224,14 @@ def run_via_stream(chat_id: int, goal: str) -> None:
 
                         deltas = evt.get("delta_status") or []
                         if deltas:
-                            send_message(chat_id, "\n".join(str(d) for d in deltas))
+                            friendly_msgs = []
+                            for d in deltas:
+                                friendly = _user_friendly_status(str(d))
+                                if friendly and friendly not in _sent_statuses:
+                                    friendly_msgs.append(friendly)
+                                    _sent_statuses.add(friendly)
+                            if friendly_msgs:
+                                send_message(chat_id, "\n".join(friendly_msgs))
                             last_status_t = time.time()
                         elif time.time() - last_status_t > 120:
                             send_message(
@@ -195,7 +247,14 @@ def run_via_stream(chat_id: int, goal: str) -> None:
                                 out = evt.get("final_output") or ""
                                 text = f"{err}\n\n{out}" if out else str(err)
                             else:
-                                text = evt.get("final_output") or "(empty final_output)"
+                                raw = evt.get("final_output") or ""
+                                text = _strip_technical_metadata(raw) or "No response received."
+                                all_msgs = evt.get("status_messages") or []
+                                if any("truncated at token limit" in m for m in all_msgs):
+                                    text += (
+                                        "\n\n⚠️ *Note: this report may be incomplete — "
+                                        "the draft reached the length limit.*"
+                                    )
                             send_message(chat_id, text)
                             return
 
@@ -251,7 +310,14 @@ def run_via_sync_post(client: httpx.Client, chat_id: int, goal: str) -> None:
         body_out = data.get("final_output") or ""
         out = f"{err}\n\n{body_out}" if body_out else str(err)
     else:
-        out = data.get("final_output") or "(empty final_output)"
+        raw = data.get("final_output") or ""
+        out = _strip_technical_metadata(raw) or "No response received."
+        all_msgs = data.get("status_messages") or []
+        if any("truncated at token limit" in m for m in all_msgs):
+            out += (
+                "\n\n⚠️ *Note: this report may be incomplete — "
+                "the draft reached the length limit.*"
+            )
 
     send_message(chat_id, out)
 
