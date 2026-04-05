@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 
 import httpx
@@ -45,6 +46,17 @@ LIVE_DEFAULT = os.getenv("TELEGRAM_LIVE_STATUS", "1").lower() in (
     "yes",
     "on",
 )
+
+
+def _api_unreachable_message() -> str:
+    return (
+        f"Cannot reach AgnesOps at {AGNES_BASE} (connection refused).\n\n"
+        "Fix:\n"
+        "1) Terminal A — start the API:\n"
+        "   uvicorn server:app --host 127.0.0.1 --port 8000\n"
+        "2) Check: curl -s http://127.0.0.1:8000/health\n"
+        "3) If you use another host/port, set AGNES_API_BASE in .env to match, then restart this bridge."
+    )
 
 
 def send_message(chat_id: int, text: str) -> None:
@@ -108,6 +120,19 @@ def _parse_sse_events(resp: httpx.Response):
                     print("SSE tail JSON error:", e, "|", payload[:240], file=sys.stderr)
 
 
+def _typing_loop(chat_id: int, stop_event: threading.Event) -> None:
+    """Send typing action every ~4s until stop_event is set (daemon thread)."""
+    while not stop_event.wait(4.0):
+        try:
+            with httpx.Client(timeout=10.0) as c:
+                c.post(
+                    f"{TG}/sendChatAction",
+                    json={"chat_id": chat_id, "action": "typing"},
+                )
+        except Exception:
+            pass
+
+
 def run_via_stream(chat_id: int, goal: str) -> None:
     """Call /run/stream, forward status deltas to Telegram, then final_output."""
     body = {
@@ -121,61 +146,83 @@ def run_via_stream(chat_id: int, goal: str) -> None:
         f"If nothing arrives for ~{_TIMEOUT_SEC:.0f}s, check Terminal 1 (uvicorn).",
     )
     got_final = False
+    _stop_typing = threading.Event()
+    _typing_thread = threading.Thread(
+        target=_typing_loop, args=(chat_id, _stop_typing), daemon=True
+    )
+    _typing_thread.start()
     try:
-        with httpx.Client(timeout=RUN_TIMEOUT) as run_client:
-            with run_client.stream(
-                "POST",
-                f"{AGNES_BASE}/run/stream",
-                json=body,
-            ) as resp:
-                try:
-                    resp.raise_for_status()
-                except httpx.HTTPStatusError as e:
-                    send_message(
-                        chat_id,
-                        f"AgnesOps /run/stream HTTP {e.response.status_code}: {e.response.text[:500]}",
-                    )
-                    return
-
-                for evt in _parse_sse_events(resp):
-                    if not isinstance(evt, dict):
-                        continue
-                    print(str(evt)[:180] + ("…" if len(str(evt)) > 180 else ""), flush=True)
-
-                    deltas = evt.get("delta_status") or []
-                    if deltas:
-                        send_message(chat_id, "\n".join(str(d) for d in deltas))
-
-                    if evt.get("done"):
-                        got_final = True
-                        if evt.get("error"):
-                            err = evt["error"]
-                            out = evt.get("final_output") or ""
-                            text = f"{err}\n\n{out}" if out else str(err)
-                        else:
-                            text = evt.get("final_output") or "(empty final_output)"
-                        send_message(chat_id, text)
+        last_status_t = time.time()
+        try:
+            with httpx.Client(timeout=RUN_TIMEOUT) as run_client:
+                with run_client.stream(
+                    "POST",
+                    f"{AGNES_BASE}/run/stream",
+                    json=body,
+                ) as resp:
+                    try:
+                        resp.raise_for_status()
+                    except httpx.HTTPStatusError as e:
+                        send_message(
+                            chat_id,
+                            f"AgnesOps /run/stream HTTP {e.response.status_code}: {e.response.text[:500]}",
+                        )
                         return
 
-    except httpx.ReadTimeout:
-        send_message(
-            chat_id,
-            f"Read timeout after {_TIMEOUT_SEC:.0f}s — run may still be going on the server. "
-            "Try TELEGRAM_LIVE_STATUS=0 or raise AGNES_RUN_TIMEOUT_SEC.",
-        )
-        return
-    except httpx.HTTPError as e:
-        send_message(chat_id, f"HTTP error on stream: {e}")
-        return
+                    for evt in _parse_sse_events(resp):
+                        if not isinstance(evt, dict):
+                            continue
+                        print(
+                            str(evt)[:180] + ("…" if len(str(evt)) > 180 else ""),
+                            flush=True,
+                        )
 
-    if not got_final:
-        send_message(
-            chat_id,
-            "Stream ended without a final `done` event (SSE parse or server issue). "
-            "Check the `uvicorn` terminal for errors. For a simpler path, set "
-            "TELEGRAM_LIVE_STATUS=0 in `.env` and restart this bridge — it uses a single "
-            "POST /run and sends one reply when the run finishes.",
-        )
+                        deltas = evt.get("delta_status") or []
+                        if deltas:
+                            send_message(chat_id, "\n".join(str(d) for d in deltas))
+                            last_status_t = time.time()
+                        elif time.time() - last_status_t > 120:
+                            send_message(
+                                chat_id,
+                                "Still running (no new status for 120s)…",
+                            )
+                            last_status_t = time.time()
+
+                        if evt.get("done"):
+                            got_final = True
+                            if evt.get("error"):
+                                err = evt["error"]
+                                out = evt.get("final_output") or ""
+                                text = f"{err}\n\n{out}" if out else str(err)
+                            else:
+                                text = evt.get("final_output") or "(empty final_output)"
+                            send_message(chat_id, text)
+                            return
+
+        except httpx.ReadTimeout:
+            send_message(
+                chat_id,
+                f"Read timeout after {_TIMEOUT_SEC:.0f}s — run may still be going on the server. "
+                "Try TELEGRAM_LIVE_STATUS=0 or raise AGNES_RUN_TIMEOUT_SEC.",
+            )
+            return
+        except httpx.ConnectError:
+            send_message(chat_id, _api_unreachable_message())
+            return
+        except httpx.HTTPError as e:
+            send_message(chat_id, f"HTTP error on stream: {e}")
+            return
+
+        if not got_final:
+            send_message(
+                chat_id,
+                "Stream ended without a final `done` event (SSE parse or server issue). "
+                "Check the `uvicorn` terminal for errors. For a simpler path, set "
+                "TELEGRAM_LIVE_STATUS=0 in `.env` and restart this bridge — it uses a single "
+                "POST /run and sends one reply when the run finishes.",
+            )
+    finally:
+        _stop_typing.set()
 
 
 def run_via_sync_post(client: httpx.Client, chat_id: int, goal: str) -> None:
@@ -189,6 +236,9 @@ def run_via_sync_post(client: httpx.Client, chat_id: int, goal: str) -> None:
         run_resp = client.post(f"{AGNES_BASE}/run", json=body, timeout=RUN_TIMEOUT)
         run_resp.raise_for_status()
         data = run_resp.json()
+    except httpx.ConnectError:
+        send_message(chat_id, _api_unreachable_message())
+        return
     except httpx.HTTPError as e:
         send_message(chat_id, f"HTTP error calling AgnesOps: {e}")
         return
