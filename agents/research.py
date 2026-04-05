@@ -150,6 +150,31 @@ def fetch_page(url: str):
         except Exception:
             if attempt < 2:
                 time.sleep(0.4 * (2**attempt))
+
+    # Optional Playwright re-fetch (D7: inline heuristic on text string, not source dict)
+    if os.getenv("USE_PLAYWRIGHT_FETCH", "0") == "1":
+        _marker_hits = sum(1 for m in BOILERPLATE_MARKERS if m in text.lower())
+        _needs_browser = len(text) < 200 or _marker_hits >= 3
+        if _needs_browser:
+            try:
+                from playwright.sync_api import sync_playwright  # lazy import
+
+                pw_text = ""
+                with sync_playwright() as p:
+                    browser = p.chromium.launch(headless=True)
+                    try:
+                        page = browser.new_page()
+                        page.goto(url, timeout=15000)
+                        page.wait_for_load_state("networkidle", timeout=10000)
+                        raw_body = page.inner_text("body")
+                        pw_text = re.sub(r"\s+", " ", (raw_body or "").strip()).strip()
+                    finally:
+                        browser.close()
+                if pw_text:
+                    text = pw_text
+            except Exception:
+                pass  # fall through to httpx result
+
     return text[:4000]
 
 
