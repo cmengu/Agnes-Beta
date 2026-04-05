@@ -248,12 +248,19 @@ def research(state: dict):
         f"Source ({s['url']}):\n{s['full_content'][:1500]}" for s in synthesis_sources
     )
 
+    _synthesis_user = f"Sub-tasks: {sub_tasks}\n\nSources:\n{sources_text}"
+    if len(high) < 2:
+        _synthesis_user += (
+            "\n\nNote: Few high-signal web extracts were obtained; "
+            "say explicitly if schedules or prices are not in the sources "
+            "and avoid inventing flight numbers."
+        )
     state["research_summary"] = call_agnes(
         system=(
             "You are a research synthesiser. Given findings from multiple sources, "
             "produce a coherent, factual research summary grouped by sub-task."
         ),
-        user=f"Sub-tasks: {sub_tasks}\n\nSources:\n{sources_text}",
+        user=_synthesis_user,
     )
 
     n_clean = len(clean_sources)
