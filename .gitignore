@@ -1,1 +1,5 @@
 .claude/
+
+# Secrets — keep `.env.example` in git for the template only
+.env
+.env.local
