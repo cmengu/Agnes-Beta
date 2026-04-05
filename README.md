@@ -12,31 +12,25 @@ The repository’s purpose is to keep **policy** (`constitution.md`), **shared s
 
 At the highest level, clients call a small FastAPI surface. The app builds a single **frontier state** object (budgets, provenance, scores) and runs one **LangGraph** execution. Agents mutate that state and set `next_agent`; only `graph.py` wires transitions. Research talks to external search and fetch HTTP APIs, not to the LLM, for current web facts. Memory is file-backed JSON for user history, distilled “skills,” and a small cross-goal source cache.
 
+Below uses `graph TD`, short labels, and no quoted subgraph titles so it matches [GitHub-flavored Mermaid](https://github.blog/developer-skills/github/include-diagrams-markdown-files-mermaid/) more reliably. If the diagram still shows a blank box or “chunk failed”, try a hard refresh; that error is often GitHub’s viewer failing to load its Mermaid JS bundle, not your syntax.
+
 ```mermaid
-flowchart TB
-  subgraph Clients
-    OC[OpenClaw / Telegram]
-    CLI[curl / custom client]
-  end
-
-  subgraph AgnesClaw["AgnesClaw service"]
-    API[FastAPI server.py]
-    LG[LangGraph graph.py]
-    MEM[memory.py]
-    ST[(JSON stores)]
-    API --> LG
-    LG --> MEM
-    MEM --> ST
-  end
-
-  subgraph External["External services"]
-    ZM[ZenMux / Agnes LLM]
-    SR[Search API Serper or Tavily]
-    WEB[Web pages fetch]
-  end
+graph TD
+  OC[OpenClaw or Telegram]
+  CLI[cURL or custom client]
+  API[FastAPI server.py]
+  LG[LangGraph graph.py]
+  MEM[memory.py]
+  ST[(JSON stores)]
+  ZM[ZenMux Agnes LLM]
+  SR[Serper or Tavily]
+  WEB[HTTP page fetch]
 
   OC --> API
   CLI --> API
+  API --> LG
+  LG --> MEM
+  MEM --> ST
   LG --> ZM
   LG --> SR
   LG --> WEB
@@ -58,23 +52,24 @@ Each node is a Python function that reads and updates the shared `AgentState` (`
 Typical control flow (actual wiring is the same `next_agent` mechanism from every node):
 
 ```mermaid
-flowchart TB
+graph TD
   CO[Coordinator]
   RE[Research]
   WR[Writer]
   CR[Critic]
   OUT[Output]
+  FIN([Finished])
 
-  CO -->|constitution ok, tasks ready| RE
-  CO -->|blocked or budget hit| OUT
-  RE -->|sub-tasks remain| RE
+  CO -->|ok| RE
+  CO -->|block or budget| OUT
+  RE -->|more tasks| RE
   RE -->|synthesis done| WR
   WR --> CR
-  CR -->|confidence low, first pass| RE
-  CR -->|needs revision| WR
-  CR -->|approved or revision cap| OUT
-  CR -->|budget exhausted| OUT
-  OUT --> END([END])
+  CR -->|recheck once| RE
+  CR -->|revise| WR
+  CR -->|approve or cap| OUT
+  CR -->|budget| OUT
+  OUT --> FIN
 ```
 
 ---
