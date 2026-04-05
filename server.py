@@ -1,5 +1,4 @@
 # server.py — FastAPI: CORS, /health, /history, /skills; async /run and /run/stream (ainvoke/astream).
-import json
 import os
 import time
 import uuid
@@ -7,6 +6,12 @@ import uuid
 from dotenv import load_dotenv
 
 load_dotenv()
+
+import json as _json
+import logging as _logging
+
+_logging.basicConfig(format="%(message)s", level=_logging.INFO)
+_log = _logging.getLogger("agnesops")
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -143,6 +148,16 @@ def skills():
 @app.post("/run")
 async def run(req: RunRequest):
     initial_state = build_initial_state(req)
+    _log.info(
+        _json.dumps(
+            {
+                "event": "run_start",
+                "session_id": initial_state["session_id"],
+                "user_id": req.user_id,
+                "goal_len": len(req.goal),
+            }
+        )
+    )
     final_state = await graph.ainvoke(initial_state)
     return _finalize_response(final_state)
 
@@ -151,6 +166,16 @@ async def run(req: RunRequest):
 async def run_stream(req: RunRequest):
     async def event_source():
         initial_state = build_initial_state(req)
+        _log.info(
+            _json.dumps(
+                {
+                    "event": "run_start",
+                    "session_id": initial_state["session_id"],
+                    "user_id": req.user_id,
+                    "goal_len": len(req.goal),
+                }
+            )
+        )
         prev_n = 0
         last_state = initial_state
         async for last_state in graph.astream(initial_state, stream_mode="values"):
@@ -171,8 +196,8 @@ async def run_stream(req: RunRequest):
                 "revision_count": last_state.get("revision_count"),
                 "error": last_state.get("error"),
             }
-            yield f"data: {json.dumps(payload, default=str)}\n\n"
+            yield f"data: {_json.dumps(payload, default=str)}\n\n"
         done = _finalize_response(last_state)
-        yield f"data: {json.dumps({'done': True, **done}, default=str)}\n\n"
+        yield f"data: {_json.dumps({'done': True, **done}, default=str)}\n\n"
 
     return StreamingResponse(event_source(), media_type="text/event-stream")
