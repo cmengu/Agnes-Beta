@@ -107,9 +107,3 @@ curl -s -X POST http://127.0.0.1:8000/run \
 ```
 
 Do not commit `.env`; rotate any key that has been shared or logged.
-
----
-
-## Further reading
-
-The full step-by-step build plan and verification notes live in `.claude/plans/projet-overview.md` (local / optional copy in your workspace; adjust paths if you move docs into git explicitly).
