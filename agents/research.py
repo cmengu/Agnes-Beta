@@ -1,9 +1,9 @@
-# agents/research.py — web search, fetch, sanitisation, synthesis (Phase 3).
+# agents/research.py — parallel sub-task fetch (fork-join), synthesis cap, URL dedup for critic recheck.
 import hashlib
-import json
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import httpx
 from openai import OpenAI
@@ -54,7 +54,6 @@ def call_agnes(system: str, user: str):
 
 
 def sanitize_source(source: dict):
-    """Prompt injection defense — strip tainted content before synthesis."""
     text = source.get("full_content", "").lower()
     for pattern in INJECTION_PATTERNS:
         if pattern in text:
@@ -66,7 +65,6 @@ def sanitize_source(source: dict):
 
 
 def search_web(query: str):
-    """Call the configured search provider. Returns list of {url, title, snippet}."""
     if SEARCH_PROVIDER == "serper":
         resp = httpx.post(
             "https://google.serper.dev/search",
@@ -76,11 +74,7 @@ def search_web(query: str):
         )
         results = resp.json().get("organic", [])
         return [
-            {
-                "url": r.get("link", ""),
-                "title": r.get("title", ""),
-                "snippet": r.get("snippet", ""),
-            }
+            {"url": r.get("link", ""), "title": r.get("title", ""), "snippet": r.get("snippet", "")}
             for r in results[:5]
         ]
     if SEARCH_PROVIDER == "tavily":
@@ -91,18 +85,13 @@ def search_web(query: str):
         )
         results = resp.json().get("results", [])
         return [
-            {
-                "url": r.get("url", ""),
-                "title": r.get("title", ""),
-                "snippet": r.get("content", ""),
-            }
+            {"url": r.get("url", ""), "title": r.get("title", ""), "snippet": r.get("content", "")}
             for r in results[:5]
         ]
     return []
 
 
 def fetch_page(url: str):
-    """Fetch full page text. Return empty string on failure."""
     if not url or url == "stub":
         return ""
     try:
@@ -119,15 +108,34 @@ def fetch_page(url: str):
         return ""
 
 
+def _fetch_subtask(idx: int, micro_queries: list):
+    """Fetch all micro-queries for one sub-task. Returns (idx, list of (query, source))."""
+    results = []
+    for query in micro_queries:
+        hits = search_web(query)
+        for r in hits[:3]:
+            full = fetch_page(r["url"])
+            src = sanitize_source(
+                {
+                    "url": r["url"],
+                    "title": r["title"],
+                    "snippet": r["snippet"],
+                    "full_content": full,
+                    "tainted": False,
+                }
+            )
+            results.append((query, src))
+    return idx, results
+
+
 def log_provenance(state: dict, action: str, output):
+    first_task = state["sub_tasks"][0] if state["sub_tasks"] else ""
     state["session_log"].append(
         {
             "agent": "research",
             "t": time.time(),
             "action": action,
-            "input_hash": hashlib.md5(
-                state["sub_tasks"][state["current_task_index"]].encode()
-            ).hexdigest()[:8],
+            "input_hash": hashlib.md5(first_task.encode()).hexdigest()[:8],
             "output": str(output)[:120],
             "next": state.get("next_agent", ""),
         }
@@ -135,7 +143,7 @@ def log_provenance(state: dict, action: str, output):
 
 
 def research(state: dict):
-    # ── BUDGET CHECK ────────────────────────────────────────────────────────
+    # ── BUDGET CHECK ──────────────────────────────────────────────────────
     state["steps_remaining"] -= 1
     elapsed = time.time() - state["run_start_time"]
     if state["steps_remaining"] <= 0 or elapsed > state["time_budget_s"]:
@@ -144,38 +152,43 @@ def research(state: dict):
         state["next_agent"] = "writer"
         return state
 
-    idx = state["current_task_index"]
-    task = state["sub_tasks"][idx]
-    micro = state["micro_queries"].get(str(idx), [task])
+    sub_tasks = state["sub_tasks"]
+    micro_queries = state["micro_queries"]
 
-    state["status_messages"].append(f"Research: working on sub-task {idx + 1} — {task}")
+    state["status_messages"].append(
+        f"Research: running {len(sub_tasks)} sub-tasks in parallel..."
+    )
 
-    for query in micro:
-        results = search_web(query)
-        for r in results[:3]:
-            full = fetch_page(r["url"])
-            raw_source = {
-                "url": r["url"],
-                "title": r["title"],
-                "snippet": r["snippet"],
-                "full_content": full,
-                "tainted": False,
-            }
-            raw_source = sanitize_source(raw_source)
-            state["raw_sources"].append(raw_source)
-            state["search_queries"].append(query)
+    seen_urls: set = {s["url"] for s in state["raw_sources"] if s.get("url")}
 
-    if idx < len(state["sub_tasks"]) - 1:
-        state["current_task_index"] += 1
-        state["next_agent"] = "research"
-        log_provenance(state, f"completed sub-task {idx + 1}", "continuing")
-        return state
+    workers = min(len(sub_tasks), 4)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [
+            pool.submit(_fetch_subtask, idx, micro_queries.get(str(idx), [task]))
+            for idx, task in enumerate(sub_tasks)
+        ]
+        for fut in as_completed(futures):
+            idx, pairs = fut.result()
+            added = 0
+            for query, src in pairs:
+                url = src.get("url", "")
+                if url and url in seen_urls:
+                    continue
+                if url:
+                    seen_urls.add(url)
+                state["raw_sources"].append(src)
+                state["search_queries"].append(query)
+                added += 1
+            state["status_messages"].append(
+                f"Research: sub-task {idx + 1} complete — {added} sources added."
+            )
 
     state["status_messages"].append("Research: synthesising findings across all sub-tasks...")
 
     clean_sources = [s for s in state["raw_sources"] if not s.get("tainted")]
+    synthesis_sources = clean_sources[:8]
     sources_text = "\n\n".join(
-        f"Source ({s['url']}):\n{s['full_content']}" for s in clean_sources
+        f"Source ({s['url']}):\n{s['full_content'][:1500]}" for s in synthesis_sources
     )
 
     state["research_summary"] = call_agnes(
@@ -183,18 +196,21 @@ def research(state: dict):
             "You are a research synthesiser. Given findings from multiple sources, "
             "produce a coherent, factual research summary grouped by sub-task."
         ),
-        user=f"Sub-tasks: {state['sub_tasks']}\n\nSources:\n{sources_text}",
+        user=f"Sub-tasks: {sub_tasks}\n\nSources:\n{sources_text}",
     )
 
     n_clean = len(clean_sources)
     n_tainted = len(state["raw_sources"]) - n_clean
     state["research_confidence"] = round(min(1.0, n_clean / 4.0), 2)
+    state["current_task_index"] = len(sub_tasks) - 1 if sub_tasks else 0
 
     state["status_messages"].append(
         f"Research: complete — {n_clean} clean sources, {n_tainted} excluded, "
         f"confidence={state['research_confidence']:.2f}"
     )
 
-    log_provenance(state, "synthesis_complete", f"confidence={state['research_confidence']}")
+    log_provenance(
+        state, "parallel_synthesis_complete", f"confidence={state['research_confidence']}"
+    )
     state["next_agent"] = "writer"
     return state
