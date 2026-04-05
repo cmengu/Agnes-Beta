@@ -3,3 +3,10 @@
 # Secrets — keep `.env.example` in git for the template only
 .env
 .env.local
+
+.venv/
+__pycache__/
+*.pyc
+memory_store.json
+skill_store.json
+community_store.json
