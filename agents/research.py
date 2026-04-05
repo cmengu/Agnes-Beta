@@ -127,18 +127,30 @@ def search_web(query: str):
 def fetch_page(url: str):
     if not url or url == "stub":
         return ""
-    try:
-        resp = httpx.get(
-            url,
-            timeout=8,
-            follow_redirects=True,
-            headers={"User-Agent": "AgnesOps/1.0"},
-        )
-        text = re.sub(r"<[^>]+>", " ", resp.text)
-        text = re.sub(r"\s+", " ", text).strip()
-        return text[:4000]
-    except Exception:
-        return ""
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    text = ""
+    for attempt in range(3):
+        try:
+            resp = httpx.get(
+                url,
+                timeout=5,
+                follow_redirects=True,
+                headers=headers,
+            )
+            raw = re.sub(r"<[^>]+>", " ", resp.text)
+            text = re.sub(r"\s+", " ", raw).strip()
+            break
+        except Exception:
+            if attempt < 2:
+                time.sleep(0.4 * (2**attempt))
+    return text[:4000]
 
 
 def _fetch_subtask(idx: int, micro_queries: list):
