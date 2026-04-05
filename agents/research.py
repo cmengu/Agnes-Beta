@@ -4,6 +4,7 @@ import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlparse
 
 import httpx
 from openai import OpenAI
@@ -39,6 +40,38 @@ INJECTION_PATTERNS = [
     "respond only with",
     "pretend you are",
 ]
+
+BOILERPLATE_MARKERS = (
+    "window.",
+    "wiz_global_data",
+    "datalayer",
+    "gtag(",
+    "cloudflare",
+    "challenge-platform",
+    "/cdn-cgi/",
+    "navigator.",
+    "function(){",
+    "googletagmanager",
+)
+
+
+def _visible_text_ratio(text: str) -> float:
+    if not text:
+        return 0.0
+    alnum = sum(1 for c in text if c.isalnum())
+    return alnum / len(text)
+
+
+def _mark_source_signal(source: dict) -> None:
+    """Tag each raw source with low_signal / signal_hits from fetched HTML text (non-tainted)."""
+    full = source.get("full_content") or ""
+    lower = full.lower()
+    # Occurrence counts across markers (density), not just “how many marker types appear once”.
+    hit = sum(lower.count(m) for m in BOILERPLATE_MARKERS)
+    # Min length: stubs & error pages; keep below plan doc examples (~160 chars × 3) so prose checks pass.
+    low_signal = len(full) < 100 or hit >= 3 or _visible_text_ratio(full) < 0.12
+    source["low_signal"] = low_signal
+    source["signal_hits"] = hit
 
 
 def call_agnes(system: str, user: str):
@@ -124,6 +157,7 @@ def _fetch_subtask(idx: int, micro_queries: list):
                     "tainted": False,
                 }
             )
+            _mark_source_signal(src)
             results.append((query, src))
     return idx, results
 
@@ -186,6 +220,17 @@ def research(state: dict):
     state["status_messages"].append("Research: synthesising findings across all sub-tasks...")
 
     clean_sources = [s for s in state["raw_sources"] if not s.get("tainted")]
+    # High-signal set and domains for confidence (D6: must precede synthesis for Step 3 nudge).
+    high = [
+        s
+        for s in state["raw_sources"]
+        if not s.get("tainted") and not s.get("low_signal")
+    ]
+    domains = {urlparse(s["url"]).netloc.lower() for s in high if s.get("url")}
+    # D1: confidence = high-signal fraction (cap 5) × domain diversity (cap 3)
+    base = min(1.0, len(high) / 5.0) * min(1.0, len(domains) / 3.0)
+    state["research_confidence"] = round(base, 2)
+
     synthesis_sources = clean_sources[:8]
     sources_text = "\n\n".join(
         f"Source ({s['url']}):\n{s['full_content'][:1500]}" for s in synthesis_sources
@@ -201,11 +246,11 @@ def research(state: dict):
 
     n_clean = len(clean_sources)
     n_tainted = len(state["raw_sources"]) - n_clean
-    state["research_confidence"] = round(min(1.0, n_clean / 4.0), 2)
     state["current_task_index"] = len(sub_tasks) - 1 if sub_tasks else 0
 
     state["status_messages"].append(
-        f"Research: complete — {n_clean} clean sources, {n_tainted} excluded, "
+        f"Research: complete — {n_clean} clean sources ({len(high)} high-signal, "
+        f"{len(domains)} domains), {n_tainted} excluded, "
         f"confidence={state['research_confidence']:.2f}"
     )
 
