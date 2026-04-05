@@ -128,3 +128,14 @@ python telegram_bridge.py
 Then message **`@AgnesHackathonBot`** with a research goal (not only `/start`). By default the bridge uses **`/run/stream`**: you get **several Telegram texts** as the pipeline runs (same `status_messages` as the backend), then the **full report**. Set **`TELEGRAM_LIVE_STATUS=0`** in `.env` if you only want one “Running…” plus the final message. The terminal running `telegram_bridge.py` also **prints** each SSE line so you can observe processing there. For a **hosted** API, set `AGNES_API_BASE` to that public URL instead.
 
 Do not commit `.env`; rotate any key that has been shared or logged.
+
+### Optional: Playwright for JS-heavy pages
+
+Some sites return little text over plain HTTP. Set `USE_PLAYWRIGHT_FETCH=1` in `.env` and install the extra dependency, then install a browser:
+
+```bash
+pip install -r requirements-playwright.txt
+playwright install chromium
+```
+
+Fetches still default to **httpx** first; Playwright runs only when the env flag is on and the stripped HTML looks short or boilerplate-heavy (see `agents/research.py` `fetch_page`). This adds latency and binary weight — keep the flag off unless you need it.
