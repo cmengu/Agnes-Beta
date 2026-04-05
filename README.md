@@ -113,4 +113,18 @@ curl -s -X POST http://127.0.0.1:8000/run \
   -d '{"goal":"Your research question here","user_id":"local-test","channel":"telegram"}'
 ```
 
+### Telegram (same laptop as the API)
+
+`getUpdates` only proves the bot receives chats. To **run AgnesOps from Telegram**, start the API and the bridge:
+
+```bash
+# Terminal 1
+uvicorn server:app --host 127.0.0.1 --port 8000
+
+# Terminal 2 (needs TELEGRAM_BOT_TOKEN and AGNES_API_BASE in .env)
+python telegram_bridge.py
+```
+
+Then message **`@AgnesHackathonBot`** with a research goal (not only `/start`). By default the bridge uses **`/run/stream`**: you get **several Telegram texts** as the pipeline runs (same `status_messages` as the backend), then the **full report**. Set **`TELEGRAM_LIVE_STATUS=0`** in `.env` if you only want one “Running…” plus the final message. The terminal running `telegram_bridge.py` also **prints** each SSE line so you can observe processing there. For a **hosted** API, set `AGNES_API_BASE` to that public URL instead.
+
 Do not commit `.env`; rotate any key that has been shared or logged.
