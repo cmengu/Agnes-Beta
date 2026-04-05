@@ -6,6 +6,8 @@
 
 The repository’s purpose is to keep **policy** (`constitution.md`), **shared state** (`state.py`), **persistence** (`memory.py`), and **agent behaviour** (`agents/`) separate so the graph stays testable and the demo narrative (“constitution → research → write → critic → output”) stays traceable.
 
+**Research confidence (heuristic):** The quality badge’s research confidence is **not** “booking accuracy” or a guarantee of correct schedules or prices. It is derived from **high-signal** fetches (enough readable text, low boilerplate markers) and **domain diversity** among those sources (`agents/research.py`). Script-heavy or bot-wall pages can lower confidence even when many URLs were retrieved.
+
 ---
 
 ## High-level architecture
@@ -102,6 +104,8 @@ pip install -r requirements.txt
 cp .env.example .env   # fill ZENMUX_API_KEY and the search key for SEARCH_PROVIDER
 uvicorn server:app --host 127.0.0.1 --port 8000
 ```
+
+**Timeouts:** `AGNES_RUN_TIMEOUT_SEC` (default 900) caps how long `telegram_bridge.py` waits on `POST /run` and `/run/stream`.
 
 Then open `demo.html` locally, or probe the API:
 
