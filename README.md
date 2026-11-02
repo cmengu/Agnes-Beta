@@ -1,8 +1,23 @@
-# AgnesClaw (AgnesOps)
+<div align="center">
 
-## What it is
+# AgnesOps
 
-**AgnesOps** turns a research goal into a cited Markdown report: a **constitution** check, **parallel web research**, **writer** with inline **`[n]` citations**, and a **critic** that debates and scores the draft before delivery. Orchestration is **LangGraph**; the API is **FastAPI** (`/run`, `/run/stream`); LLM calls go through **ZenMux** (OpenAI-compatible). Policy, state, memory, and agents live in separate modules so the pipeline stays easy to trace and test.
+Turns a research goal into a cited Markdown report: a constitution check, parallel web research, a writer, and a critic that scores the draft before delivery.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/how-it-works-dark.svg">
+  <img src="docs/how-it-works-light.svg" alt="Run order: Coordinator, Research, Writer, Critic, Output. The Critic can send the draft back to the Writer twice and back to Research once; a blocked goal or spent budget goes straight to Output." width="100%">
+</picture>
+
+<sub>Run order read from graph.py and agents/*.py. A drawn figure, not output from a run: the pipeline needs a ZenMux key and a search key, so none was run for this README.</sub>
+
+</div>
+
+---
+
+## Why
+
+A single LLM answer gives no sources to check. AgnesOps keeps each step separate (policy check, search and fetch, writing, critique) so a run can be traced in `session_log`, and the writer is prompted to cite numbered sources inline. Citations are requested in the prompt, not checked afterwards.
 
 ---
 
@@ -11,8 +26,8 @@
 ### Research and evidence
 
 - **Parallel sub-tasks** with a thread pool, **URL deduplication** (including after a critic-triggered research pass).
-- **Smarter “confidence”** — not raw page count. Each fetched page is scored for **readability vs boilerplate** (script shells, trackers, bot-wall patterns). Confidence reflects **high-signal sources** and **how many distinct domains** they come from, so a pile of empty SPAs does not read as “100% sure.”
-- **Resilient fetching** — **retries with backoff**, **browser-like HTTP headers**, and an optional **Playwright** pass for short or boilerplate-heavy HTML when `USE_PLAYWRIGHT_FETCH=1` (see [Optional: Playwright](#optional-playwright-for-js-heavy-pages)).
+- **Confidence is not raw page count.** Each fetched page is scored for **readability vs boilerplate** (script shells, trackers, bot-wall patterns). Confidence reflects **high-signal sources** and **how many distinct domains** they come from, so a pile of empty SPAs does not read as “100% sure.” The score is the fraction of high-signal pages (full at 5) times the fraction of distinct domains (full at 3), in `agents/research.py`.
+- **Resilient fetching** — **retries with backoff**, **browser-like HTTP headers**, and an optional **Playwright** pass for short or boilerplate-heavy HTML when `USE_PLAYWRIGHT_FETCH=1` (see Optional: Playwright below).
 - **Thin evidence → honest synthesis** — when there are **few high-signal extracts**, the synthesiser is nudged to say when schedules/prices are missing and **not to invent** flight-style facts.
 
 ### Writing, critic, and output
@@ -33,7 +48,7 @@
 The **`telegram_bridge.py`** adapter keeps **API responses unchanged** (badge + footer stay in `final_output` for the web UI and `curl`). On Telegram, users get a **cleaner experience**:
 
 - Short **“On it…”** acknowledgement instead of internal setup text.
-- **~5 milestone-style updates** (e.g. preparing plan, researching, writing, refining) — noisy lines like per-sub-task source counts are **filtered**; **writer truncation warnings** still pass through **verbatim** when they occur.
+- **a few milestone-style updates** (preparing plan, researching, synthesising, writing, refining) — noisy lines like per-sub-task source counts are **filtered**; **writer truncation warnings** still pass through **verbatim** when they occur.
 - **Final message** has the **badge and run footer stripped** so users see the **report body** (and **travel disclaimer** when present). If a run was **truncated at the token limit**, a **plain-language note** is appended to the final message.
 - **Typing indicator** while the stream is open, plus a **“still running”** nudge if there is **no new status for ~120s**.
 - **`/start` / `/help`** — one-line invite to send a research question (no env-tuning jargon).
@@ -47,31 +62,9 @@ The **`telegram_bridge.py`** adapter keeps **API responses unchanged** (badge + 
 
 ---
 
-## High-level architecture
+## Architecture
 
-Clients call a small FastAPI surface. The app builds one **frontier state** (budgets, provenance, scores) and runs a single **LangGraph** execution. Agents update state and set `next_agent`; `graph.py` wires routes. Research uses search + HTTP fetch; synthesis caps context for smaller models. Memory is file-backed JSON (`/history`, `/skills`).
-
-```mermaid
-graph TD
-  OC[OpenClaw or Telegram]
-  CLI[cURL or custom client]
-  API[FastAPI server.py]
-  LG[LangGraph graph.py]
-  MEM[memory.py]
-  ST[(JSON stores)]
-  ZM[ZenMux Agnes LLM]
-  SR[Serper or Tavily]
-  WEB[HTTP page fetch]
-
-  OC --> API
-  CLI --> API
-  API --> LG
-  LG --> MEM
-  MEM --> ST
-  LG --> ZM
-  LG --> SR
-  LG --> WEB
-```
+Clients call a small FastAPI surface. The app builds one state dict (budgets, provenance, scores) and runs a single LangGraph execution. Agents update state and set `next_agent`; `graph.py` routes on that field. Research uses a search API (Serper or Tavily) plus HTTP fetch; the synthesis prompt takes at most 8 clean sources, 1500 characters each. Memory is file-backed JSON (`/history`, `/skills`). LLM calls go through ZenMux (OpenAI-compatible); the default model is `sapiens-ai/agnes-1.5-pro`, set by `LLM_MODEL`.
 
 **API endpoints**
 
@@ -89,25 +82,7 @@ graph TD
 
 ## Agent graph
 
-```mermaid
-graph TD
-  CO[Coordinator]
-  RE[Research]
-  WR[Writer]
-  CR[Critic]
-  OUT[Output]
-  FIN([Finished])
-
-  CO -->|ok| RE
-  CO -->|block or budget| OUT
-  RE -->|parallel fetch plus synthesis| WR
-  WR --> CR
-  CR -->|recheck once| RE
-  CR -->|revise| WR
-  CR -->|approve or cap| OUT
-  CR -->|budget| OUT
-  OUT --> FIN
-```
+The figure at the top is the graph. In words: `coordinator` goes to `research`, or to `output` if the goal is blocked, the plan cannot be parsed, or the budget is spent. `research` always goes to `writer` (also when its own budget check fails). `writer` goes to `critic`, or to `output` if the budget is spent. `critic` goes to `output` when the weakest axis is at least `CRITIC_SCORE_THRESHOLD` (default 0.75), after two revisions, or when the budget is spent; otherwise back to `writer`. If research confidence is below 0.5 and no revision has happened, it sends the run back to `research` once. The budget is 14 agent steps or 150 seconds (`server.py`, `build_initial_state`).
 
 ---
 
